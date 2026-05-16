@@ -1,0 +1,7 @@
+{
+  "input_dir": "C:/LLM-Study/RAG-runtime-files/input",
+  "output_dir": "C:/LLM-Study/RAG-runtime-files/output",
+  "vector_db_dir": "C:/LLM-Study/RAG-runtime-files/vectorstore/chroma",
+  "collection": "oceanstor_dorado_docs",
+  "embedding_model": "BAAI/bge-small-zh-v1.5"
+}

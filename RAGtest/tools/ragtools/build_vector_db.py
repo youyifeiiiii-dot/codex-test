@@ -129,6 +129,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=default_model)
     parser.add_argument("--chunk-size", type=int, default=900)
     parser.add_argument("--overlap", type=int, default=120)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--reset", action="store_true", help="Delete the DB first.")
     return parser.parse_args()
 
@@ -141,13 +142,19 @@ def main() -> None:
         raise FileNotFoundError(f"Docs directory not found: {args.docs_dir}")
 
     if args.reset and args.db_dir.exists():
+        print(f"Removing existing DB: {args.db_dir}", flush=True)
         shutil.rmtree(args.db_dir)
 
+    print(f"Loading Markdown from: {args.docs_dir}", flush=True)
     ids, documents, metadatas = load_markdown_chunks(
         args.docs_dir, chunk_size=args.chunk_size, overlap=args.overlap
     )
     if not documents:
         raise SystemExit(f"No Markdown content found in: {args.docs_dir}")
+
+    source_count = len(set(m["source_file"] for m in metadatas))
+    print(f"Prepared {len(documents)} chunks from {source_count} files", flush=True)
+    print(f"Loading embedding model: {args.model}", flush=True)
 
     args.db_dir.mkdir(parents=True, exist_ok=True)
     embedding_function = SentenceTransformerEmbeddingFunction(args.model)
@@ -158,7 +165,7 @@ def main() -> None:
         metadata={"hnsw:space": "cosine", "embedding_model": args.model},
     )
 
-    batch_size = 64
+    batch_size = args.batch_size
     for start in range(0, len(documents), batch_size):
         end = start + batch_size
         collection.upsert(
@@ -166,9 +173,11 @@ def main() -> None:
             documents=documents[start:end],
             metadatas=metadatas[start:end],
         )
+        current = min(end, len(documents))
+        print(f"Indexed {current}/{len(documents)} chunks", flush=True)
 
     print(f"Built collection: {args.collection}")
-    print(f"Documents: {len(documents)} chunks from {len(set(m['source_file'] for m in metadatas))} files")
+    print(f"Documents: {len(documents)} chunks from {source_count} files")
     print(f"Persisted at: {args.db_dir}")
 
 

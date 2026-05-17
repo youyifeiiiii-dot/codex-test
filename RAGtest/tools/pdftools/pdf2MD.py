@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -15,6 +16,7 @@ PROJECT_ROOT = SCRIPT_DIR.parents[1]
 CONFIG_PATH = PROJECT_ROOT / "rag_config.json"
 DEFAULT_INPUT_DIR = SCRIPT_DIR / "input"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
+MANIFEST_NAME = ".pdf2md_manifest.json"
 SUPPORTED_EXTENSIONS = {
     ".pdf",
     ".docx",
@@ -42,6 +44,30 @@ def load_config() -> dict[str, str]:
 def configured_path(config: dict[str, str], key: str, fallback: Path) -> Path:
     value = config.get(key)
     return Path(value) if value else fallback
+
+
+def load_manifest(output_dir: Path) -> dict[str, dict[str, object]]:
+    manifest_path = output_dir / MANIFEST_NAME
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def save_manifest(output_dir: Path, manifest: dict[str, dict[str, object]]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / MANIFEST_NAME
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def file_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def configure_console_encoding() -> None:
@@ -283,10 +309,57 @@ def convert_file_to_markdown(input_path: Path, output_dir: Path) -> list[Path]:
     raise ValueError(f"Unsupported file type: {input_path}")
 
 
+def expected_output_names(input_path: Path) -> list[str]:
+    suffix = input_path.suffix.lower()
+    base_name = safe_stem(input_path.stem)
+
+    if suffix == ".pdf":
+        try:
+            import fitz
+        except ImportError as exc:
+            raise SystemExit(
+                "PyMuPDF is required. Install it with: pip install pymupdf"
+            ) from exc
+
+        with fitz.open(input_path) as document:
+            return [
+                f"{base_name}_page_{page_number:03d}.md"
+                for page_number in range(1, document.page_count + 1)
+            ]
+
+    if suffix == ".docx":
+        page_count = len(list(iter_docx_pages(input_path))) or 1
+        return [
+            f"{base_name}_page_{page_number:03d}.md"
+            for page_number in range(1, page_count + 1)
+        ]
+
+    if suffix == ".pptx":
+        with zipfile.ZipFile(input_path) as archive:
+            slide_count = len(
+                [
+                    name
+                    for name in archive.namelist()
+                    if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+                ]
+            )
+        return [
+            f"{base_name}_slide_{slide_number:03d}.md"
+            for slide_number in range(1, slide_count + 1)
+        ]
+
+    if suffix in TEXT_EXTENSIONS:
+        return [f"{base_name}.md"]
+
+    raise ValueError(f"Unsupported file type: {input_path}")
+
+
 def convert_folder(input_dir: Path, output_dir: Path) -> list[Path]:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input folder not found: {input_dir}")
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = load_manifest(output_dir)
     input_files = sorted(
         path
         for path in input_dir.iterdir()
@@ -297,10 +370,48 @@ def convert_folder(input_dir: Path, output_dir: Path) -> list[Path]:
         return []
 
     all_outputs: list[Path] = []
+    skipped = 0
     for input_path in input_files:
+        source_key = str(input_path.resolve())
+        fingerprint = file_fingerprint(input_path)
+        manifest_entry = manifest.get(source_key, {})
+        output_names = manifest_entry.get("outputs", [])
+        if not manifest_entry:
+            output_names = expected_output_names(input_path)
+
+        if (
+            (manifest_entry.get("fingerprint") == fingerprint or not manifest_entry)
+            and isinstance(output_names, list)
+            and bool(output_names)
+            and all((output_dir / str(name)).exists() for name in output_names)
+        ):
+            manifest[source_key] = {
+                "fingerprint": fingerprint,
+                "source_file": input_path.name,
+                "outputs": [str(name) for name in output_names],
+            }
+            skipped += 1
+            print(f"Skipped {input_path.name}: already converted")
+            continue
+
+        old_output_names = manifest_entry.get("outputs", [])
+        for output_name in old_output_names if isinstance(old_output_names, list) else []:
+            output_path = output_dir / str(output_name)
+            if output_path.exists():
+                output_path.unlink()
+
         outputs = convert_file_to_markdown(input_path, output_dir)
         all_outputs.extend(outputs)
+        manifest[source_key] = {
+            "fingerprint": fingerprint,
+            "source_file": input_path.name,
+            "outputs": [path.name for path in outputs],
+        }
         print(f"Converted {input_path.name}: {len(outputs)} Markdown files")
+
+    save_manifest(output_dir, manifest)
+    if skipped:
+        print(f"Skipped {skipped} unchanged source files")
 
     return all_outputs
 

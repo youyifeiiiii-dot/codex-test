@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -114,6 +115,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def metadata_value(metadata: dict[str, object], key: str) -> str:
+    value = metadata.get(key)
+    return str(value) if value is not None else ""
+
+
+def source_file_from_markdown(md_path: Path) -> str:
+    if not md_path.exists():
+        return ""
+
+    for line in md_path.read_text(encoding="utf-8", errors="replace").splitlines()[:12]:
+        match = re.match(r">\s+Source (?:PDF|file):\s+`(.+?)`", line)
+        if match:
+            return match.group(1)
+
+    return ""
+
+
+def citation_from_metadata(metadata: dict[str, object]) -> str:
+    md_source = metadata_value(metadata, "source_file")
+    source_path = metadata_value(metadata, "source_path")
+    original_source = source_file_from_markdown(Path(source_path)) if source_path else ""
+    page_number = metadata.get("page_number") or ""
+
+    parts = []
+    if original_source:
+        parts.append(f"original: {original_source}")
+    if page_number:
+        parts.append(f"page: {page_number}")
+    if md_source:
+        parts.append(f"md: {md_source}")
+    if source_path:
+        parts.append(f"path: {source_path}")
+
+    return " | ".join(parts)
+
+
 def print_results(results: dict[str, object]) -> None:
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
@@ -124,8 +161,7 @@ def print_results(results: dict[str, object]) -> None:
     ):
         print(f"\n## Result {index}")
         print(f"score_distance: {distance:.4f}")
-        print(f"source: {metadata.get('source_file')}")
-        print(f"page: {metadata.get('page_number')}")
+        print(f"citation: {citation_from_metadata(metadata)}")
         print(document[:1200].strip())
 
 
